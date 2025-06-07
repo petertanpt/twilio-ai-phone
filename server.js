@@ -10,10 +10,10 @@ require('dotenv').config();
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 
-// Serve Twilio webhook
+// Twilio webhook
 app.post('/voice', (req, res) => {
   const response = new twiml.VoiceResponse();
-  response.start().stream({ url: 'wss://' + req.headers.host + '/audio' });
+  response.start().stream({ url: 'wss://ai-phone-server-cwp0.onrender.com/audio' });
   response.say({ voice: 'Polly.Joanna', language: 'en-US' }, 'Hello, I am your AI assistant. How can I help you today?');
   res.type('text/xml');
   res.send(response.toString());
@@ -24,7 +24,7 @@ const server = app.listen(PORT, () => {
   console.log('✅ AI Voice Server running on port', PORT);
 });
 
-// WebSocket server on same port
+// WebSocket handler
 const wss = new WebSocket.Server({ server });
 wss.on('connection', function connection(ws) {
   console.log('🔊 WebSocket connected: receiving Twilio audio stream');
