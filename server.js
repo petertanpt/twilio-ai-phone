@@ -1,87 +1,88 @@
+
 const express = require('express');
+const fs = require('fs');
+const fetch = require('node-fetch');
+const multer = require('multer');
 const bodyParser = require('body-parser');
 const { twiml } = require('twilio');
-const fs = require('fs');
-const multer = require('multer');
-const FormData = require('form-data');
-const fetch = require('node-fetch');
 
 const app = express();
+const upload = multer();
 app.use(bodyParser.urlencoded({ extended: false }));
-app.use(express.static('public'));
 
-const upload = multer({ dest: 'uploads/' });
-
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-// Serve Twilio webhook
-app.post('/voice', (req, res) => {
+let lastReplyReady = false;
+
+app.post('/voice', async (req, res) => {
   const response = new twiml.VoiceResponse();
-  response.start().stream({ url: 'wss://your-render-app-name.onrender.com/audio' });
-  response.say({ voice: 'Polly.Joanna' }, 'Hello, I am your AI assistant, how can I help you today?');
-  response.play('https://your-render-app-name.onrender.com/reply.mp3');
-  response.pause({ length: 60 });
+
+  if (lastReplyReady && fs.existsSync('reply.mp3')) {
+    response.play({}, 'https://' + req.headers.host + '/reply.mp3');
+    lastReplyReady = false;
+  } else {
+    response.say('Hello, I am your AI assistant. Please speak after the beep.');
+    response.record({
+      maxLength: 10,
+      action: '/process-recording',
+      method: 'POST',
+      trim: 'do-not-trim'
+    });
+  }
+
   res.type('text/xml');
   res.send(response.toString());
 });
 
-// Serve reply audio
-app.use('/reply.mp3', express.static('reply.mp3'));
+app.post('/process-recording', async (req, res) => {
+  const recordingUrl = req.body.RecordingUrl + '.wav';
 
-// WebSocket 接收音频
-const WebSocket = require('ws');
-const wss = new WebSocket.Server({ port: 10000 });
+  const audioRes = await fetch(recordingUrl);
+  const audioBuffer = await audioRes.buffer();
+  fs.writeFileSync('recording.wav', audioBuffer);
 
-wss.on('connection', function connection(ws) {
-  console.log('🔊 WebSocket connected');
-  let audioBuffer = [];
+  const transcript = await transcribeWithWhisper('recording.wav');
+  const gptReply = await chatWithGPT(transcript);
+  await synthesizeWithElevenLabs(gptReply);
 
-  ws.on('message', async function incoming(message) {
-    const parsed = JSON.parse(message);
-    const event = parsed.event;
+  lastReplyReady = true;
 
-    if (event === 'start') {
-      console.log('✅ Stream started');
-    }
-
-    if (event === 'media') {
-      const buffer = Buffer.from(parsed.media.payload, 'base64');
-      audioBuffer.push(buffer);
-    }
-
-    if (event === 'stop') {
-      console.log('🛑 Stream ended');
-      const finalAudio = Buffer.concat(audioBuffer);
-      fs.writeFileSync('call.ulaw', finalAudio);
-      const transcript = await transcribeWithWhisper('call.ulaw');
-      console.log('📝 Transcript:', transcript);
-      const reply = await chatWithGPT(transcript);
-      console.log('🤖 GPT Reply:', reply);
-      await generateSpeech(reply);
-    }
-  });
+  const response = new twiml.VoiceResponse();
+  response.redirect('/voice');
+  res.type('text/xml');
+  res.send(response.toString());
 });
 
-// Whisper API
-async function transcribeWithWhisper(filePath) {
-  const form = new FormData();
-  form.append('file', fs.createReadStream(filePath));
-  form.append('model', 'whisper-1');
+app.get('/reply.mp3', (req, res) => {
+  const file = 'reply.mp3';
+  if (fs.existsSync(file)) {
+    res.set('Content-Type', 'audio/mpeg');
+    res.sendFile(__dirname + '/reply.mp3');
+  } else {
+    res.status(404).send('Not ready');
+  }
+});
 
-  const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+async function transcribeWithWhisper(filepath) {
+  const formData = new fetch.FormData();
+  formData.append('file', fs.createReadStream(filepath));
+  formData.append('model', 'whisper-1');
+
+  const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
-    body: form
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`
+    },
+    body: formData
   });
 
-  const data = await res.json();
+  const data = await response.json();
   return data.text;
 }
 
-// GPT-4o
-async function chatWithGPT(prompt) {
+async function chatWithGPT(text) {
   const res = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -91,8 +92,8 @@ async function chatWithGPT(prompt) {
     body: JSON.stringify({
       model: 'gpt-4o',
       messages: [
-        { role: 'system', content: '你是一个简洁有礼貌的AI电话助理，用英文回复客户' },
-        { role: 'user', content: prompt }
+        { role: 'system', content: '你是一个电话客服，请用简洁自然的语言回答客户。' },
+        { role: 'user', content: text }
       ]
     })
   });
@@ -101,8 +102,7 @@ async function chatWithGPT(prompt) {
   return data.choices[0].message.content;
 }
 
-// ElevenLabs 语音合成
-async function generateSpeech(text) {
+async function synthesizeWithElevenLabs(text) {
   const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`, {
     method: 'POST',
     headers: {
@@ -110,18 +110,16 @@ async function generateSpeech(text) {
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      text,
-      model_id: 'eleven_monolingual_v1',
-      voice_settings: { stability: 0.5, similarity_boost: 0.75 }
+      text: text,
+      model_id: 'eleven_multilingual_v2',
+      voice_settings: { stability: 0.5, similarity_boost: 0.5 }
     })
   });
 
-  const audioBuffer = await res.buffer();
-  fs.writeFileSync('reply.mp3', audioBuffer);
+  const buffer = await res.buffer();
+  fs.writeFileSync('reply.mp3', buffer);
 }
 
-// Start app
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`✅ AI Voice Server running on port ${PORT}`);
+app.listen(process.env.PORT || 3000, () => {
+  console.log('✅ AI Voice Server running');
 });
