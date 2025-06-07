@@ -1,279 +1,217 @@
-    import express from 'express';
-    import bodyParser from 'body-parser';
-    import multer from 'multer';
-    import fs from 'fs';
-    import path from 'path';
-    import FormData from 'form-data';
-    import fetch from 'node-fetch';
+import express from 'express';
+import bodyParser from 'body-parser';
+import fs from 'fs/promises';
+import fsSync from 'fs';
+import path from 'path';
+import FormData from 'form-data';
+import fetch from 'node-fetch';
 import { randomUUID } from 'crypto';
-    import { fileURLToPath } from 'url';
+import { fileURLToPath } from 'url';
 
-    // ESM __dirname workaround
-    const __filename = fileURLToPath(import.meta.url);
-    const __dirname = path.dirname(__filename);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-    const app = express();
-    const upload = multer({ dest: 'uploads/' });
+const app = express();
+app.use(bodyParser.urlencoded({ extended: false }));
+app.use(bodyParser.json());
 
-    app.use(bodyParser.urlencoded({ extended: false }));
-    app.use(bodyParser.json());
+// 环境变量
+const { OPENAI_API_KEY, ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, PORT = 3000 } = process.env;
 
-    // 环境变量
-    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-    const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-    const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
+// 检查
+for (const [k, v] of Object.entries({ OPENAI_API_KEY, ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID })) {
+  if (!v) {
+    console.error(`❌ 缺少环境变量: ${k}`);
+    process.exit(1);
+  }
+}
 
-    // 环境变量检查
-    const requiredEnvVars = [
-        { name: 'OPENAI_API_KEY', value: OPENAI_API_KEY },
-        { name: 'ELEVENLABS_API_KEY', value: ELEVENLABS_API_KEY },
-        { name: 'ELEVENLABS_VOICE_ID', value: ELEVENLABS_VOICE_ID }
-    ];
-    requiredEnvVars.forEach(env => {
-        if (!env.value) {
-            console.error(`❌ 缺少必要环境变量: ${env.name}`);
-            console.error('请设置所有必要的环境变量后重启服务');
-            process.exit(1);
-        }
-    });
+const publicDir = path.join(__dirname, 'public');
+const uploadsDir = path.join(__dirname, 'uploads');
+await fs.mkdir(publicDir, { recursive: true });
+await fs.mkdir(uploadsDir, { recursive: true });
 
-    const publicDir = path.join(__dirname, 'public');
-    const uploadsDir = path.join(__dirname, 'uploads');
-
-    // 确保目录存在
-    [publicDir, uploadsDir].forEach(dir => {
-        if (!fs.existsSync(dir)) {
-            fs.mkdirSync(dir, { recursive: true });
-            console.log(`📁 创建目录: ${path.basename(dir)}`);
-        }
-    });
-
-    // 定期清理旧音频文件
-    
-// 定期异步清理旧音频文件（每 10 分钟）
+/* 自动清理 30 分钟前的音频，每 10 分钟执行一次 */
 setInterval(async () => {
-    try {
-        const files = await fs.promises.readdir(publicDir);
-        const now = Date.now();
-        for (const file of files) {
-            if (file.startsWith('reply-') && file.endsWith('.mp3')) {
-                const filePath = path.join(publicDir, file);
-                const stats = await fs.promises.stat(filePath);
-                // 删除超过 30 分钟的文件
-                if (now - stats.mtime.getTime() > 30 * 60 * 1000) {
-                    await fs.promises.unlink(filePath);
-                    console.log(`🗑️ 清理过期音频: ${file}`);
-                }
-            }
+  try {
+    const files = await fs.readdir(publicDir);
+    const now = Date.now();
+    for (const file of files) {
+      if (file.startsWith('reply-') && file.endsWith('.mp3')) {
+        const fp = path.join(publicDir, file);
+        const stat = await fs.stat(fp);
+        if (now - stat.mtime.getTime() > 30 * 60 * 1000) {
+          await fs.unlink(fp);
+          console.log('🗑️ 已清理', file);
         }
-    } catch (error) {
-        console.error('清理文件时出错:', error);
+      }
     }
+  } catch (e) {
+    console.error('清理错误:', e.message);
+  }
 }, 10 * 60 * 1000);
-// 主页状态
-    app.get('/', (req, res) => {
-        const audioFiles = fs.readdirSync(publicDir).filter(f => f.endsWith('.mp3'));
-        
-res.send(`
+
+/* 首页 */
+app.get('/', async (req, res) => {
+  const audioFiles = (await fs.readdir(publicDir)).filter(f => f.endsWith('.mp3'));
+  res.send(`
     <!DOCTYPE html>
-    <html>
-    <head>
-        <title>AI 电话助手 - 企业版</title>
-        <meta charset="utf-8">
-        <style>
-            body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
-            .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-            .status { background: #d4edda; color: #155724; padding: 15px; border-radius: 5px; margin: 10px 0; }
-            code { background: #f8f9fa; padding: 2px 6px; border-radius: 3px; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>🤖 AI 电话助手 - 企业版</h1>
-            <div class="status">✅ 服务运行正常</div>
-            <p><strong>Twilio Webhook URL:</strong><br><code>https://${req.headers.host}/voice</code></p>
-            <p><strong>活跃音频文件:</strong> ${audioFiles.length}</p>
-            <p><a href="/health">📊 健康检查</a></p>
-        </div>
-    </body>
-    </html>
-`);
+    <html><head><meta charset="utf-8"><title>AI 电话助手</title>
+    <style>
+      body{font-family:Arial;margin:40px;background:#f5f5f5}
+      .container{max-width:600px;margin:auto;background:#fff;padding:30px;border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,.1)}
+      .status{background:#d4edda;color:#155724;padding:15px;border-radius:5px;margin:10px 0}
+      code{background:#f8f9fa;padding:2px 6px;border-radius:3px}
+    </style></head>
+    <body><div class="container">
+    <h1>🤖 AI 电话助手</h1>
+    <div class="status">✅ 服务运行正常</div>
+    <p><strong>Twilio Webhook:</strong><br><code>https://${req.headers.host}/voice</code></p>
+    <p><strong>活跃音频文件:</strong> ${audioFiles.length}</p>
+    <p><a href="/health">📊 健康检查</a></p>
+    </div></body></html>
+  `);
 });
 
-// Twilio 语音 webhook
-    app.post('/voice', (req, res) => {
-        console.log('📞 收到 Twilio 通话');
-        res.type('text/xml').send(`
-            <Response>
-                <Say voice="Polly.Joanna">您好！我是AI助手，听到提示音后请讲话。</Say>
-                <Record action="/process-recording" method="POST" maxLength="10" playBeep="true" />
-            </Response>
-        `);
-    });
+/* Twilio greeting */
+app.post('/voice', (req, res) => {
+  res.type('text/xml').send(`
+    <Response>
+      <Say voice="Polly.Joanna">您好！我是AI助手，听到提示音后请讲话。</Say>
+      <Record action="/process-recording" method="POST" maxLength="10" playBeep="true" />
+    </Response>
+  `);
+});
 
-    // 处理录音
-    app.post('/process-recording', upload.single('Recording'), async (req, res) => {
-        const startTime = Date.now();
-        let filePath = null;
-        try {
-            if (!req.file) throw new Error('未收到录音文件');
-            filePath = req.file.path;
-            console.log(`📁 录音文件: ${path.basename(filePath)}`);
+/* 处理录音 */
+app.post('/process-recording', async (req, res) => {
+  let tempFile = null;
+  try {
+    const { RecordingUrl } = req.body;
+    if (!RecordingUrl) throw new Error('Twilio 未返回 RecordingUrl');
 
-            // Whisper
-            const userText = await transcribeWithWhisper(filePath);
-            console.log('🔊 识别内容:', userText);
+    const wavRes = await fetch(`${RecordingUrl}.wav`);
+    if (!wavRes.ok) throw new Error(`下载录音失败: ${wavRes.status}`);
+    const wavBuf = Buffer.from(await wavRes.arrayBuffer());
 
-            if (!userText || userText.trim().length < 3) throw new Error('转录结果为空');
-
-            // GPT
-            const replyText = await chatWithGPT(userText);
-            console.log('🤖 GPT 回复:', replyText);
-
-            // ElevenLabs
-            const fileName = await synthesizeWithElevenLabs(replyText);
-
-            const processingTime = Date.now() - startTime;
-            console.log(`✅ 处理完成 (耗时: ${processingTime}ms)`);
-
-            // 清理上传文件
-            if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
-
-            res.type('text/xml').send(`
-                <Response>
-                    <Play>https://${req.headers.host}/audio/${fileName}</Play>
-                    <Record action="/process-recording" method="POST" maxLength="10" playBeep="true" />
-                </Response>
-            `);
-        } catch (error) {
-            console.error('❌ 处理失败:', error.message);
-            if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
-            res.type('text/xml').send(`
-                <Response>
-                    <Say voice="Polly.Joanna">抱歉，处理您的消息时遇到问题，请重试。</Say>
-                    <Record action="/process-recording" method="POST" maxLength="10" playBeep="true" />
-                </Response>
-            `);
-        }
-    });
-
-    // 音频文件服务
-    app.get('/audio/:filename', (req, res) => {
-        const filename = req.params.filename;
-        const filePath = path.join(publicDir, filename);
-        if (fs.existsSync(filePath)) {
-            res.set({
-                'Content-Type': 'audio/mpeg',
-                'Cache-Control': 'no-cache'
-            });
-            res.sendFile(filePath);
-        } else {
-            res.status(404).json({ error: 'Audio not found' });
-        }
-    });
-
-    // 健康检查
-    app.get('/health', (req, res) => {
-        const uptime = process.uptime();
-        res.json({
-            status: 'healthy',
-            uptime: `${Math.floor(uptime)}s`,
-            timestamp: new Date().toISOString()
-        });
-    });
+    tempFile = path.join(uploadsDir, `tw-${Date.now()}.wav`);
+    await fs.writeFile(tempFile, wavBuf);
+    console.log('📥 保存录音', tempFile);
 
     // Whisper
-    async function transcribeWithWhisper(filePath) {
-        const formData = new FormData();
-        formData.append('file', fs.createReadStream(filePath));
-        formData.append('model', 'whisper-1');
-
-        const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${OPENAI_API_KEY}`,
-                ...formData.getHeaders()
-            },
-            body: formData
-        });
-
-        if (!response.ok) {
-            const errText = await response.text();
-            throw new Error(`Whisper API 调用失败: ${response.status} - ${errText}`);
-        }
-
-        const result = await response.json();
-        if (!result.text) throw new Error('Whisper 返回空转录');
-        return result.text;
-    }
+    const userText = await transcribeWithWhisper(tempFile);
+    if (!userText || userText.trim().length < 3) throw new Error('转录结果过短');
+    console.log('🔊 识别:', userText);
 
     // GPT
-    async function chatWithGPT(userText) {
-        const response = await fetch('https://api.openai.com/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${OPENAI_API_KEY}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                model: 'gpt-4',
-                messages: [
-                    { role: 'system', content: '你是一个友好的 AI 电话助手，用简短自然的中文回答问题。' },
-                    { role: 'user', content: userText }
-                ],
-                max_tokens: 100,
-                temperature: 0.7
-            })
-        });
-
-        if (!response.ok) {
-            const errText = await response.text();
-            throw new Error(`ChatGPT API 调用失败: ${response.status} - ${errText}`);
-        }
-
-        const result = await response.json();
-        if (!result.choices?.[0]?.message?.content) throw new Error('ChatGPT 返回空回复');
-        return result.choices[0].message.content;
-    }
+    const replyText = await chatWithGPT(userText);
+    console.log('🤖 GPT:', replyText);
 
     // ElevenLabs
-    async function synthesizeWithElevenLabs(text) {
-        const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`, {
-            method: 'POST',
-            headers: {
-                'xi-api-key': ELEVENLABS_API_KEY,
-                'Content-Type': 'application/json',
-                'Accept': 'audio/mpeg'
-            },
-            body: JSON.stringify({
-                text,
-                model_id: 'eleven_multilingual_v2',
-                voice_settings: {
-                    stability: 0.7,
-                    similarity_boost: 0.8,
-                    style: 0.2,
-                    use_speaker_boost: true
-                }
-            })
-        });
+    const audioName = await synthesizeWithElevenLabs(replyText);
 
-        if (!response.ok) {
-            const errText = await response.text();
-            throw new Error(`ElevenLabs 语音合成失败: ${response.status} - ${errText}`);
-        }
+    res.type('text/xml').send(`
+      <Response>
+        <Play>https://${req.headers.host}/audio/${audioName}</Play>
+        <Record action="/process-recording" method="POST" maxLength="10" playBeep="true" />
+      </Response>
+    `);
 
-        const buffer = await response.arrayBuffer();
-        const fileName = `reply-${Date.now()}-${randomUUID().slice(0, 8)}.mp3`;
-        const filePath = path.join(publicDir, fileName);
-        await fs.promises.writeFile(filePath, Buffer.from(buffer));
-        return fileName;
-    }
+  } catch (err) {
+    console.error('❌ 处理失败:', err.message);
+    res.type('text/xml').send(`
+      <Response>
+        <Say voice="Polly.Joanna">抱歉，处理您的消息时遇到问题，请重试。</Say>
+        <Record action="/process-recording" method="POST" maxLength="10" playBeep="true" />
+      </Response>
+    `);
+  } finally {
+    if (tempFile) await fs.unlink(tempFile).catch(()=>{});
+  }
+});
 
-    const PORT = process.env.PORT || 3000;
-    app.listen(PORT, () => {
-        console.log(`
-🚀 AI 电话助手启动成功！
-🌐 访问: http://localhost:${PORT}
-📡 Twilio Webhook: /voice
-        `);
-    });
+/* 音频服务 */
+app.get('/audio/:file', async (req, res) => {
+  const fp = path.join(publicDir, req.params.file);
+  try {
+    await fs.access(fp);
+    res.set({ 'Content-Type': 'audio/mpeg', 'Cache-Control': 'no-cache' });
+    res.sendFile(fp);
+  } catch {
+    res.status(404).json({ error: 'audio not found' });
+  }
+});
+
+/* 健康检查 */
+app.get('/health', async (_req, res) => {
+  const files = (await fs.readdir(publicDir)).filter(f=>f.endsWith('.mp3'));
+  res.json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    audioFiles: files.length
+  });
+});
+
+/* Whisper */
+async function transcribeWithWhisper(filePath) {
+  const formData = new FormData();
+  formData.append('file', fsSync.createReadStream(filePath));
+  formData.append('model', 'whisper-1');
+  const resp = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, ...formData.getHeaders() },
+    body: formData
+  });
+  if (!resp.ok) throw new Error(`Whisper 失败: ${resp.status}`);
+  const { text } = await resp.json();
+  return text;
+}
+
+/* GPT */
+async function chatWithGPT(text) {
+  const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'gpt-4',
+      messages: [
+        { role: 'system', content: '你是一个简洁友好的中文电话助手，回复不超过30字。' },
+        { role: 'user', content: text }
+      ],
+      max_tokens: 60,
+      temperature: 0.7
+    })
+  });
+  if (!resp.ok) throw new Error(`GPT 失败: ${resp.status}`);
+  const data = await resp.json();
+  return data.choices[0].message.content;
+}
+
+/* ElevenLabs */
+async function synthesizeWithElevenLabs(text) {
+  const resp = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`, {
+    method: 'POST',
+    headers: {
+      'xi-api-key': ELEVENLABS_API_KEY,
+      'Content-Type': 'application/json',
+      'Accept': 'audio/mpeg'
+    },
+    body: JSON.stringify({
+      text,
+      model_id: 'eleven_multilingual_v2',
+      voice_settings: {
+        stability: 0.7,
+        similarity_boost: 0.8,
+        style: 0.2,
+        use_speaker_boost: true
+      }
+    })
+  });
+  if (!resp.ok) throw new Error(`ElevenLabs 失败: ${resp.status}`);
+  const buf = Buffer.from(await resp.arrayBuffer());
+  const fileName = `reply-${Date.now()}-${randomUUID().slice(0,8)}.mp3`;
+  await fs.writeFile(path.join(publicDir, fileName), buf);
+  return fileName;
+}
+
+app.listen(PORT, () => console.log(`🚀 Server on ${PORT}`));
