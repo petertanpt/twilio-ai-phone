@@ -1,10 +1,9 @@
 {
   "name": "twilio-ai-phone",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "audio": "node audio-stream.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "axios": "^1.6.0",
